@@ -82,6 +82,11 @@
 #include "serdata.hpp"
 #include "demangle.hpp"
 
+//RMW_HAZCAT INCLUDES
+#include "rmw_hazcat/allocators/hma_template.h"
+#include "rmw_hazcat/types.h"
+#include "rmw_hazcat/hazcat_message_queue.h"
+
 using namespace std::literals::chrono_literals;
 
 /* Security must be enabled when compiling and requires cyclone to support QOS property lists */
@@ -1578,12 +1583,25 @@ extern "C" rmw_ret_t rmw_publish_loaned_message(
   void * ros_message,
   rmw_publisher_allocation_t * allocation)
 {
+  /*
+  Original cyclone implementation:
   (void) publisher;
   (void) ros_message;
   (void) allocation;
 
   RMW_SET_ERROR_MSG("rmw_publish_loaned_message not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+  
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(ros_message, RMW_RET_INVALID_ARGUMENT);
+
+  hma_allocator_t * alloc = ((pub_sub_data_t *)publisher->data)->alloc;
+
+  // TODO(nightduck): Implement per-message size, in case messages are smaller than upper bound
+  size_t size = ((pub_sub_data_t *)publisher->data)->msg_size;
+
+  return hazcat_publish(publisher, ros_message, size);
 }
 
 static const rosidl_message_type_support_t * get_typesupport(
@@ -2159,22 +2177,69 @@ extern "C" rmw_ret_t rmw_borrow_loaned_message(
   const rosidl_message_type_support_t * type_support,
   void ** ros_message)
 {
+  /*
+  Original Cyclone implementation
   (void) publisher;
   (void) type_support;
   (void) ros_message;
   RMW_SET_ERROR_MSG("rmw_borrow_loaned_message not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+  
+
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(type_support, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(ros_message, RMW_RET_INVALID_ARGUMENT);
+  if (publisher->implementation_identifier != rmw_get_implementation_identifier()) {
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+  if (NULL != *ros_message) {
+    RMW_SET_ERROR_MSG("Non-null message given to rmw_borrow_loaned_message");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
+  rmw_ret_t ret;
+  size_t size;
+  rosidl_runtime_c__Sequence__bound dummy;
+  if (RMW_RET_OK != (ret = rmw_get_serialized_message_size(type_support, &dummy, &size))) {
+    RMW_SET_ERROR_MSG("Unable to get length of message");
+    return ret;
+  }
+
+  hma_allocator_t * alloc = ((pub_sub_data_t *)publisher->data)->alloc;
+  int offset = ALLOCATE(alloc, size);
+  if (offset < 0) {
+    RMW_SET_ERROR_MSG("unable to allocate memory for message");
+    return RMW_RET_ERROR;
+  }
+  *ros_message = GET_PTR(alloc, offset, void);
+
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_return_loaned_message_from_publisher(
   const rmw_publisher_t * publisher,
   void * loaned_message)
 {
+  /*
+  Original Cyclone implementation
+
   (void) publisher;
   (void) loaned_message;
   RMW_SET_ERROR_MSG(
     "rmw_return_loaned_message_from_publisher not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(loaned_message, RMW_RET_INVALID_ARGUMENT);
+
+  hma_allocator_t * alloc = ((pub_sub_data_t *)publisher->data)->alloc;
+
+  int offset = PTR_TO_OFFSET(alloc, loaned_message);
+  DEALLOCATE(alloc, offset);
+
+  return RMW_RET_OK;
 }
 
 static rmw_ret_t destroy_publisher(rmw_publisher_t * publisher)
@@ -2809,12 +2874,36 @@ extern "C" rmw_ret_t rmw_take_loaned_message(
   bool * taken,
   rmw_subscription_allocation_t * allocation)
 {
+  /*
+  Original Cyclone implementation
+
   (void) subscription;
   (void) loaned_message;
   (void) taken;
   (void) allocation;
   RMW_SET_ERROR_MSG("rmw_take_loaned_message not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+  
+
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(loaned_message, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(taken, RMW_RET_INVALID_ARGUMENT);
+  if (subscription->implementation_identifier != rmw_get_implementation_identifier()) {
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  msg_ref_t msg_ref = hazcat_take(subscription);
+  *loaned_message = msg_ref.msg;
+  if (NULL == *loaned_message) {
+    *taken = false;
+  } else {
+    *taken = true;
+  }
+
+  // TODO(nightduck): Check for errors in hazcat_take
+
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_take_loaned_message_with_info(
@@ -2824,6 +2913,9 @@ extern "C" rmw_ret_t rmw_take_loaned_message_with_info(
   rmw_message_info_t * message_info,
   rmw_subscription_allocation_t * allocation)
 {
+  /*
+  Original Cyclone implementation
+
   (void) subscription;
   (void) loaned_message;
   (void) taken;
@@ -2831,17 +2923,63 @@ extern "C" rmw_ret_t rmw_take_loaned_message_with_info(
   (void) allocation;
   RMW_SET_ERROR_MSG("rmw_take_loaned_message_with_info not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(loaned_message, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(taken, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(message_info, RMW_RET_INVALID_ARGUMENT);
+  if (subscription->implementation_identifier != rmw_get_implementation_identifier()) {
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  // TODO(nightduck): Populate message_info
+  (void *)message_info;
+
+  msg_ref_t msg_ref = hazcat_take(subscription);
+  *loaned_message = msg_ref.msg;
+  if (NULL == *loaned_message) {
+    *taken = false;
+  } else {
+    *taken = true;
+  }
+
+  // TODO(nightduck): Check for errors in hazcat_take
+
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_return_loaned_message_from_subscription(
   const rmw_subscription_t * subscription,
   void * loaned_message)
 {
+  /*
+  Original Cyclone implementation
+  
   (void) subscription;
   (void) loaned_message;
   RMW_SET_ERROR_MSG(
     "rmw_return_loaned_message_from_subscription not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
+  */
+
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(loaned_message, RMW_RET_INVALID_ARGUMENT);
+  if (subscription->implementation_identifier != rmw_get_implementation_identifier()) {
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION;
+  }
+
+  // This is a work-around since this rmw discards the allocator reference after hazcat_take
+  hma_allocator_t * alloc = get_matching_alloc(subscription, loaned_message);
+  if (NULL == alloc) {
+    RMW_SET_ERROR_MSG("Returning message that wasn't loaned");
+    return RMW_RET_ERROR;
+  }
+
+  int offset = PTR_TO_OFFSET(alloc, loaned_message);
+  DEALLOCATE(alloc, offset);
+
+  return RMW_RET_OK;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
